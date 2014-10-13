@@ -4,21 +4,23 @@ namespace :nginx do
     desc "install nginx"
     task :setup do
         on roles(:nginx) do
-            sinatraweblist = ""
-            swiftserverlist = ""
-            proxyport     = SwiftInfo['proxyport']
-            swift_nginx   = ""
+            sinatraweblist   = ""
+            swiftserverlist  = ""
+            proxyport        = SwiftInfo['proxyport']
+            swift_nginx      = ""
+            nginx            = ""
             if "#{deploy_to}".include? "production"
                 root_path    = "production"
                 sinatrawebp  = Servers['servers']['production']['sinatra']
                 swift_hosts  = Servers["servers"]["production"]["swift"]
-                swift_nginx  =Servers["servers"]["production"]["swift-nginx"][0]["ip"]
-
+                swift_nginx  = Servers["servers"]["production"]["swift-nginx"][0]["ip"]
+                nginx        = Servers["servers"]["production"]["nginx"][0]["ip"]
             elsif "#{deploy_to}".include? "staging"
-                root_path = "staging"
+                root_path    = "staging"
                 sinatrawebp  = Servers['servers']['staging']['sinatra']
                 swift_hosts  = Servers["servers"]["staging"]["swift"]
                 swift_nginx  = Servers["servers"]["staging"]["swift-nginx"][0]["ip"]
+                nginx        = Servers["servers"]["staging"]["nginx"][0]["ip"]
             else
                 root_path = "webapp"
                 execute "sudo apt-get -y install nginx"
@@ -32,6 +34,60 @@ namespace :nginx do
             #   swiftserverlist = swiftserverlist +"server "+ "#{host["ip"]}" +":#{proxyport};\\n"
             #}
 
+            execute "echo -e ' #! /bin/bash \\n" +
+            " DOMAIN=\"$1\" \\n" +
+            "if [ -z \"$DOMAIN\" ]; then  \\n" +
+            "echo \"Usage: $(basename $0) <domain>\"  \\n" +
+            "exit 11  \\n" +
+            "fi  \\n\\n" +
+            "fail_if_error() { \\n" +
+            "[ $1 != 0 ] && {  \\n" +
+            "unset PASSPHRASE  \\n" +
+            "exit 10  \\n" +
+            "}  \\n" +
+            "}  \\n" +
+            "export PASSPHRASE=$(head -c 500 /dev/urandom | tr -dc a-z0-9A-Z | head -c 128; echo)  \\n" +
+            "subj=\"  \\n" +
+            "C=CN  \\n" +
+            "ST=Shanghai  \\n" +
+            "O=VMware  \\n" +
+            "localityName=Shanghai  \\n" +
+            "commonName=$DOMAIN  \\n" +
+            "organizationalUnitName=IT  \\n" +
+            "emailAddress=rogerluo410@gmail.com \"  \\n" +
+            "echo \"Create ssl directory\" \\n" +
+            "sudo mkdir -p /etc/nginx/ssl \\n" +
+            "fail_if_error $? \\n" +
+			"cd /etc/nginx/ssl \\n" +
+			"fail_if_error $? \\n\\n" +
+			"echo \"Generate the server private key\" \\n" +
+			"openssl genrsa -des3 -out $DOMAIN.key -passout env:PASSPHRASE 2048 \\n" +
+			"fail_if_error $? \\n\\n" +
+			"echo \"Generate the CSR\" \\n" +
+			"openssl req -new -subj \"$(echo -n \"$subj\" | tr \"\n\" \"/\" )\" -key $DOMAIN.key " +
+            "-out $DOMAIN.csr -passin env:PASSPHRASE  \\n" +
+			"fail_if_error $? \\n" +
+			"sudo cp $DOMAIN.key $DOMAIN.key.org \\n" +
+			"fail_if_error $? \\n\\n" +
+			"echo \"Strip the password so we do not have to type it every time we restart Apache\" \\n" +
+			"openssl rsa -in $DOMAIN.key.org -out $DOMAIN.key -passin env:PASSPHRASE \\n" +
+			"fail_if_error $? \\n\\n" +
+			"echo \"Generate the cert (good for 10 years)\" \\n" +
+			"openssl x509 -req -days 3650 -in $DOMAIN.csr -signkey $DOMAIN.key -out $DOMAIN.crt \\n" +
+			"fail_if_error $? \\n\\n" +
+			"sudo rm server.key.org \\n" +
+			"fail_if_error $? \\n" +
+			"sudo rm server.csr \\n" +
+			"fail_if_error $? \\n\\n" +
+			"sudo chmod 0600 server.key \\n" +
+			"fail_if_error $? \\n" +
+			"sudo chmod 0600 server.crt \\n" +
+			"fail_if_error $? \\n" +
+            "return 0 \\n" +
+			"\\n" +
+            "' > ~/generate_ssl_cert.sh "
+            execute "sudo chmod +x ~/generate_ssl_cert.sh" 
+            execute "sudo ~/generate_ssl_cert.sh server"
             execute "sudo bash -c \"echo -e 'user www-data; \\n" +
             "worker_processes 4; \\n" +
             "pid /run/nginx.pid;\\n" +
@@ -44,7 +100,10 @@ namespace :nginx do
             #"upstream swiftservers{\\n" + swiftserverlist +
             #"}\\n" +
             "server {\\n" +
-            "listen  80; \\n" +
+            "listen  443 default_server ssl; \\n" +
+            "ssl on;" +
+            "ssl_certificate   /etc/nginx/ssl/server.crt;" +
+            "ssl_certificate_key /etc/nginx/ssl/server.key;" +
             "location =/ { \\n" +
             "root  /home/devops/#{root_path}/current/; \\n" +
             "index   index.html; \\n" +
@@ -65,6 +124,10 @@ namespace :nginx do
             #"location /auth {\\n" +
             #"proxy_pass http://swiftservers/;\\n"+
             #"}\\n" +
+            "}\\n" +
+            "server {\\n" +
+            "listen 80;\\n" +
+            "rewrite ^ https://\"#{nginx}\"$request_uri? permanent;\\n" +
             "}\\n" +
             "sendfile on;\\n" +
             "tcp_nopush on;\\n" +
